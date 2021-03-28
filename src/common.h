@@ -33,17 +33,19 @@
 #endif
 
 #include "crypto.h"
+#include "ev.h"
 
-int init_udprelay(const char *server_host, const char *server_port,
+int init_udprelay(EV_P_ const char *server_host, const char *server_port,
 #ifdef MODULE_LOCAL
                   const struct sockaddr *remote_addr, const int remote_addr_len,
 #ifdef MODULE_TUNNEL
                   const ss_addr_t tunnel_addr,
 #endif
 #endif
-                  int mtu, crypto_t *crypto, int timeout, const char *iface);
+                  int mtu, crypto_t *crypto, const char *server_pk,
+                  int timeout, const char *iface);
 
-void free_udprelay(void);
+void free_udprelay();
 
 #ifdef ANDROID
 int protect_socket(int fd);

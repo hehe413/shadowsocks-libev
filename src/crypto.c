@@ -34,13 +34,14 @@
 #include <stdint.h>
 #include <sodium.h>
 #include <mbedtls/md5.h>
+//#include <mach/boolean.h>
+#include <assert.h>
 
 #include "base64.h"
 #include "crypto.h"
 #include "stream.h"
 #include "aead.h"
 #include "utils.h"
-#include "ppbloom.h"
 
 int
 balloc(buffer_t *ptr, size_t capacity)
@@ -126,7 +127,9 @@ entropy_check(void)
 }
 
 crypto_t *
-crypto_init(const char *password, const char *key, const char *method)
+crypto_init(const char pk[crypto_kx_PUBLICKEYBYTES],
+        const char sk[crypto_kx_SECRETKEYBYTES],
+        const char *method)
 {
     int i, m = -1;
 
@@ -136,13 +139,6 @@ crypto_init(const char *password, const char *key, const char *method)
         FATAL("Failed to initialize sodium");
     }
 
-    // Initialize NONCE bloom filter
-#ifdef MODULE_REMOTE
-    ppbloom_init(BF_NUM_ENTRIES_FOR_SERVER, BF_ERROR_RATE_FOR_SERVER);
-#else
-    ppbloom_init(BF_NUM_ENTRIES_FOR_CLIENT, BF_ERROR_RATE_FOR_CLIENT);
-#endif
-
     if (method != NULL) {
         for (i = 0; i < STREAM_CIPHER_NUM; i++)
             if (strcmp(method, supported_stream_ciphers[i]) == 0) {
@@ -150,7 +146,7 @@ crypto_init(const char *password, const char *key, const char *method)
                 break;
             }
         if (m != -1) {
-            cipher_t *cipher = stream_init(password, key, method);
+            cipher_t *cipher = stream_init(pk, sk, method);
             if (cipher == NULL)
                 return NULL;
             crypto_t *crypto = (crypto_t *)malloc(sizeof(crypto_t));
@@ -173,7 +169,7 @@ crypto_init(const char *password, const char *key, const char *method)
                 break;
             }
         if (m != -1) {
-            cipher_t *cipher = aead_init(password, key, method);
+            cipher_t *cipher = aead_init(pk, sk, method);
             if (cipher == NULL)
                 return NULL;
             crypto_t *crypto = (crypto_t *)ss_malloc(sizeof(crypto_t));
@@ -195,7 +191,7 @@ crypto_init(const char *password, const char *key, const char *method)
     return NULL;
 }
 
-int
+size_t
 crypto_derive_key(const char *pass, uint8_t *key, size_t key_len)
 {
     size_t datal;
@@ -240,9 +236,9 @@ crypto_derive_key(const char *pass, uint8_t *key, size_t key_len)
 
 /* HKDF-Extract + HKDF-Expand */
 int crypto_hkdf(const mbedtls_md_info_t *md, const unsigned char *salt,
-                 int salt_len, const unsigned char *ikm, int ikm_len,
-                 const unsigned char *info, int info_len, unsigned char *okm,
-                 int okm_len)
+        size_t salt_len, const unsigned char *ikm, size_t ikm_len,
+        const unsigned char *info, size_t info_len, unsigned char *okm,
+        size_t okm_len)
 {
     unsigned char prk[MBEDTLS_MD_MAX_SIZE];
 
@@ -253,10 +249,10 @@ int crypto_hkdf(const mbedtls_md_info_t *md, const unsigned char *salt,
 
 /* HKDF-Extract(salt, IKM) -> PRK */
 int crypto_hkdf_extract(const mbedtls_md_info_t *md, const unsigned char *salt,
-                         int salt_len, const unsigned char *ikm, int ikm_len,
+                         size_t salt_len, const unsigned char *ikm, size_t ikm_len,
                          unsigned char *prk)
 {
-    int hash_len;
+    size_t hash_len;
     unsigned char null_salt[MBEDTLS_MD_MAX_SIZE] = { '\0' };
 
     if (salt_len < 0) {
@@ -275,8 +271,8 @@ int crypto_hkdf_extract(const mbedtls_md_info_t *md, const unsigned char *salt,
 
 /* HKDF-Expand(PRK, info, L) -> OKM */
 int crypto_hkdf_expand(const mbedtls_md_info_t *md, const unsigned char *prk,
-                        int prk_len, const unsigned char *info, int info_len,
-                        unsigned char *okm, int okm_len)
+        size_t prk_len, const unsigned char *info, size_t info_len,
+        unsigned char *okm, size_t okm_len)
 {
     int hash_len;
     int N;
@@ -342,11 +338,11 @@ int crypto_hkdf_expand(const mbedtls_md_info_t *md, const unsigned char *prk,
     return 0;
 }
 
-int
+size_t
 crypto_parse_key(const char *base64, uint8_t *key, size_t key_len)
 {
     size_t base64_len = strlen(base64);
-    int out_len = BASE64_SIZE(base64_len);
+    size_t out_len = BASE64_SIZE(base64_len);
     uint8_t out[out_len];
 
     out_len = base64_decode(out, base64, out_len);
@@ -367,6 +363,56 @@ crypto_parse_key(const char *base64, uint8_t *key, size_t key_len)
     LOGE("Generating a new random key: %s", out_key);
     FATAL("Please use the key above or input a valid key");
     return key_len;
+}
+
+int
+crypto_kx_hex2bin(unsigned char *bin, size_t bin_len, const char *hex)
+{
+    if (hex != NULL) {
+        if (bin == NULL) {
+            return -1;
+        }
+        int ret = sodium_hex2bin(bin, bin_len, hex, strlen(hex), 
+                                 NULL, NULL, NULL);
+        if (ret) {
+            LOGE("Convert hex key to bin failed: %s", hex);
+            FATAL("Cannot initialize cipher");
+        }
+    }
+    return 0;
+}
+
+int
+crypto_kx_ctx_init(kx_ctx_t *kx, int is_local,
+        unsigned char *rpk)
+{
+    int ret;
+
+    memcpy(kx->rpk, rpk, crypto_kx_PUBLICKEYBYTES);
+    if (is_local) {
+        kx->rpk_received = 1;
+        crypto_kx_keypair(kx->pk, kx->sk);
+        ret = crypto_kx_client_session_keys(kx->rx, kx->tx, kx->pk, kx->sk, rpk);
+    } else {
+        kx->pk_sent = 1;
+        kx->rpk_received = 1;
+        ret = crypto_kx_server_session_keys(kx->rx, kx->tx, kx->pk, kx->sk, rpk);
+    }
+    return ret;
+}
+
+int
+crypto_kx_ctx_init_udp(kx_ctx_t *kx, unsigned char *rpk)
+{
+    int ret;
+    memset(kx, 0, sizeof(kx_ctx_t));
+    kx->pk_sent = 1;
+    kx->rpk_received = 1;
+    crypto_kx_hex2bin(kx->rpk, crypto_kx_PUBLICKEYBYTES, rpk);
+
+    ret = crypto_derive_key(rpk, kx->tx, crypto_kx_SESSIONKEYBYTES);
+    memcpy(kx->rx, kx->tx, crypto_kx_SESSIONKEYBYTES);
+    return ret;
 }
 
 #ifdef SS_DEBUG

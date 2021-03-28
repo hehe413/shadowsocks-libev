@@ -53,11 +53,14 @@
 #include "netutils.h"
 #include "cache.h"
 #include "udprelay.h"
+#include "ev.h"
+#include "udns.h"
+#include "crypto.h"
 
 #ifdef MODULE_REMOTE
 #define MAX_UDP_CONN_NUM 512
 #else
-#define MAX_UDP_CONN_NUM 256
+#define MAX_UDP_CONN_NUM 512
 #endif
 
 #ifdef MODULE_REMOTE
@@ -98,9 +101,9 @@ extern uint64_t tx;
 extern uint64_t rx;
 #endif
 
-static int packet_size                               = DEFAULT_PACKET_SIZE;
-static int buf_size                                  = DEFAULT_PACKET_SIZE * 2;
-static int server_num                                = 0;
+static size_t packet_size                               = DEFAULT_PACKET_SIZE;
+static size_t buf_size                                  = DEFAULT_PACKET_SIZE * 2;
+static int server_num                                   = 0;
 static server_ctx_t *server_ctx_list[MAX_REMOTE_NUM] = { NULL };
 
 static int
@@ -485,6 +488,7 @@ create_server_socket(const char *host, const char *port)
 
     freeaddrinfo(result);
 
+    LOGI("UDP server started");
     return server_sock;
 }
 
@@ -688,7 +692,8 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
     balloc(buf, buf_size);
 
     // recv
-    r = recvfrom(remote_ctx->fd, buf->data, buf_size, 0, (struct sockaddr *)&src_addr, &src_addr_len);
+    r = recvfrom(remote_ctx->fd, buf->data, buf_size, 0,
+            (struct sockaddr *)&src_addr, &src_addr_len);
 
     if (r == -1) {
         // error on recv
@@ -700,10 +705,13 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
         goto CLEAN_UP;
     }
 
-    buf->len = r;
+    buf->len = (size_t)r;
 
 #ifdef MODULE_LOCAL
-    int err = server_ctx->crypto->decrypt_all(buf, server_ctx->crypto->cipher, buf_size);
+    int err = server_ctx->crypto->decrypt_all(buf,
+                                              server_ctx->crypto->cipher,
+                                              &remote_ctx->kx,
+                                              buf_size);
     if (err) {
         // drop the packet silently
         goto CLEAN_UP;
@@ -745,7 +753,7 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
     buf->len += 3;
 #endif
 
-#endif
+#endif  // end MODULE_LOCAL
 
 #ifdef MODULE_REMOTE
 
@@ -766,13 +774,16 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
     memcpy(buf->data, addr_header, addr_header_len);
     buf->len += addr_header_len;
 
-    int err = server_ctx->crypto->encrypt_all(buf, server_ctx->crypto->cipher, buf_size);
+    int err = server_ctx->crypto->encrypt_all(buf,
+                                              server_ctx->crypto->cipher,
+                                              &remote_ctx->kx,
+                                              buf_size);
     if (err) {
         // drop the packet silently
         goto CLEAN_UP;
     }
 
-#endif
+#endif  // end MODULE_REMOTE
 
     if (buf->len > packet_size) {
         LOGE("[udp] remote_recv_sendto fragmentation");
@@ -913,7 +924,10 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
 #ifdef MODULE_REMOTE
     tx += buf->len;
 
-    int err = server_ctx->crypto->decrypt_all(buf, server_ctx->crypto->cipher, buf_size);
+    int err = server_ctx->crypto->decrypt_all(buf,
+                                              server_ctx->crypto->cipher,
+                                              &server_ctx->kx,
+                                              buf_size);
     if (err) {
         // drop the packet silently
         goto CLEAN_UP;
@@ -1052,8 +1066,9 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
     struct sockaddr_storage dst_addr;
     memset(&dst_addr, 0, sizeof(struct sockaddr_storage));
 
-    int addr_header_len = parse_udprealy_header(buf->data + offset, buf->len - offset,
-                                                host, port, &dst_addr);
+    int addr_header_len = parse_udprealy_header(buf->data + offset,
+        buf->len - offset,
+        host, port, &dst_addr);
     if (addr_header_len == 0) {
         // error in parse header
         goto CLEAN_UP;
@@ -1164,6 +1179,8 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         remote_ctx->af              = remote_addr->sa_family;
         remote_ctx->addr_header_len = addr_header_len;
         memcpy(remote_ctx->addr_header, addr_header, addr_header_len);
+        // crypto_kx_ctx_init(&remote_ctx->kx, 1, server_ctx->crypto->cipher->pk);
+        memcpy(&remote_ctx->kx, &server_ctx->kx, sizeof(remote_ctx->kx));
 
         // Add to conn cache
         cache_insert(conn_cache, key, HASH_KEY_LEN, (void *)remote_ctx);
@@ -1178,7 +1195,8 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         memmove(buf->data, buf->data + offset, buf->len);
     }
 
-    int err = server_ctx->crypto->encrypt_all(buf, server_ctx->crypto->cipher, buf_size);
+    int err = server_ctx->crypto->encrypt_all(buf, server_ctx->crypto->cipher,
+            &remote_ctx->kx, buf_size);
 
     if (err) {
         // drop the packet silently
@@ -1190,13 +1208,14 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         goto CLEAN_UP;
     }
 
-    int s = sendto(remote_ctx->fd, buf->data, buf->len, 0, remote_addr, remote_addr_len);
+    ssize_t s = sendto(remote_ctx->fd, buf->data, buf->len,
+                   0, remote_addr, remote_addr_len);
 
     if (s == -1) {
         ERROR("[udp] server_recv_sendto");
     }
 
-#else
+#else // server
 
     int cache_hit  = 0;
     int need_query = 0;
@@ -1244,7 +1263,10 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
                 remote_ctx->server_ctx      = server_ctx;
                 remote_ctx->addr_header_len = addr_header_len;
                 memcpy(remote_ctx->addr_header, addr_header, addr_header_len);
-                memcpy(&remote_ctx->dst_addr, &dst_addr, sizeof(struct sockaddr_storage));
+                memcpy(&remote_ctx->dst_addr, &dst_addr,
+                       sizeof(struct sockaddr_storage));
+                crypto_kx_ctx_init(&remote_ctx->kx, 0,
+                                   server_ctx->crypto->cipher->pk);
             } else {
                 ERROR("[udp] bind() error");
                 goto CLEAN_UP;
@@ -1301,7 +1323,7 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         }
         query_ctx->query = query;
     }
-#endif
+#endif  // end MODULE_LOCAL/server
 
 CLEAN_UP:
     bfree(buf);
@@ -1317,21 +1339,22 @@ free_cb(void *key, void *element)
         LOGI("[udp] one connection freed");
     }
 
-    close_and_free_remote(EV_DEFAULT, remote_ctx);
+    close_and_free_remote(remote_ctx->server_ctx->loop, remote_ctx);
 }
 
 int
-init_udprelay(const char *server_host, const char *server_port,
+init_udprelay(EV_P_ const char *server_host, const char *server_port,
 #ifdef MODULE_LOCAL
               const struct sockaddr *remote_addr, const int remote_addr_len,
 #ifdef MODULE_TUNNEL
               const ss_addr_t tunnel_addr,
 #endif
 #endif
-              int mtu, crypto_t *crypto, int timeout, const char *iface)
+              int mtu, crypto_t *crypto, const char *server_pk,
+              int timeout, const char *iface)
 {
     // Initialize ev loop
-    struct ev_loop *loop = EV_DEFAULT;
+    // struct ev_loop *loop = EV_DEFAULT;
 
     // Initialize MTU
     if (mtu > 0) {
@@ -1354,9 +1377,7 @@ init_udprelay(const char *server_host, const char *server_port,
     setnonblocking(serverfd);
 
     server_ctx_t *server_ctx = new_server_ctx(serverfd);
-#ifdef MODULE_REMOTE
-    server_ctx->loop = loop;
-#endif
+    server_ctx->loop = EV_A;
     server_ctx->timeout    = max(timeout, MIN_UDP_TIMEOUT);
     server_ctx->crypto     = crypto;
     server_ctx->iface      = iface;
@@ -1368,8 +1389,9 @@ init_udprelay(const char *server_host, const char *server_port,
     server_ctx->tunnel_addr = tunnel_addr;
 #endif
 #endif
+    crypto_kx_ctx_init_udp(&server_ctx->kx, server_pk);
 
-    ev_io_start(loop, &server_ctx->io);
+    ev_io_start(EV_A, &server_ctx->io);
 
     server_ctx_list[server_num++] = server_ctx;
 
@@ -1379,10 +1401,11 @@ init_udprelay(const char *server_host, const char *server_port,
 void
 free_udprelay()
 {
-    struct ev_loop *loop = EV_DEFAULT;
+    // struct ev_loop *loop = EV_DEFAULT;
     while (server_num-- > 0) {
         server_ctx_t *server_ctx = server_ctx_list[server_num];
-        ev_io_stop(loop, &server_ctx->io);
+        EV_P = server_ctx->loop;
+        ev_io_stop(EV_A, &server_ctx->io);
         close(server_ctx->fd);
         cache_delete(server_ctx->conn_cache, 0);
         ss_free(server_ctx);

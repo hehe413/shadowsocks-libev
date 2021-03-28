@@ -62,6 +62,7 @@
 #include "tls.h"
 #include "plugin.h"
 #include "local.h"
+#include "crypto.h"
 
 #ifndef LIB_ONLY
 #ifdef __APPLE__
@@ -151,7 +152,7 @@ create_and_bind(const char *addr, const char *port)
 {
     struct addrinfo hints;
     struct addrinfo *result, *rp;
-    int s, listen_sock;
+    int s, listen_sock = -1;
 
     memset(&hints, 0, sizeof(struct addrinfo));
     hints.ai_family   = AF_UNSPEC;   /* Return IPv4 and IPv6 choices */
@@ -554,8 +555,9 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
                     return;
                 }
                 if (udp_assc) {
-                    close_and_free_remote(EV_A_ remote);
-                    close_and_free_server(EV_A_ server);
+                    LOGE("UDP assoc request, waiting for udp request");
+                    // close_and_free_remote(EV_A_ remote);
+                    // close_and_free_server(EV_A_ server);
                     return;
                 }
             }
@@ -601,7 +603,6 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
                     memcpy(host, buf->data + 4 + 1, name_len);
                     host[name_len] = '\0';
                     sprintf(port, "%d", p);
-
                 }
             } else if (atyp == 4) {
                 // IP V6
@@ -1086,8 +1087,15 @@ new_server(int fd)
 
     server->e_ctx = ss_align(sizeof(cipher_ctx_t));
     server->d_ctx = ss_align(sizeof(cipher_ctx_t));
-    crypto->ctx_init(crypto->cipher, server->e_ctx, 1);
-    crypto->ctx_init(crypto->cipher, server->d_ctx, 0);
+    kx_ctx_t kx;
+    memset(&kx, 0, sizeof(kx_ctx_t));
+
+    crypto_kx_ctx_init(&kx, 1, crypto->cipher->pk);
+
+    crypto->ctx_init(crypto->cipher, &kx, server->e_ctx, 1);
+    crypto->ctx_init(crypto->cipher, &kx, server->d_ctx, 0);
+    server->e_ctx->is_local = 1;
+    server->d_ctx->is_local = 1;
 
     ev_io_init(&server->recv_ctx->io, server_recv_cb, fd, EV_READ);
     ev_io_init(&server->send_ctx->io, server_send_cb, fd, EV_WRITE);
@@ -1207,18 +1215,22 @@ signal_cb(EV_P_ ev_signal *w, int revents)
 {
     if (revents & EV_SIGNAL) {
         switch (w->signum) {
-        case SIGCHLD:
+            case SIGCHLD:
+#ifndef LIB_ONLY
             if (!is_plugin_running())
                 LOGE("plugin service exit unexpectedly");
             else
                 return;
+#else
+                return;
+#endif
         case SIGUSR1:
         case SIGINT:
         case SIGTERM:
-            ev_signal_stop(EV_DEFAULT, &sigint_watcher);
-            ev_signal_stop(EV_DEFAULT, &sigterm_watcher);
-            ev_signal_stop(EV_DEFAULT, &sigchld_watcher);
-            ev_signal_stop(EV_DEFAULT, &sigusr1_watcher);
+            ev_signal_stop(EV_A, &sigint_watcher);
+            ev_signal_stop(EV_A, &sigterm_watcher);
+            ev_signal_stop(EV_A, &sigchld_watcher);
+            ev_signal_stop(EV_A, &sigusr1_watcher);
             keep_resolving = 0;
             ev_unloop(EV_A_ EVUNLOOP_ALL);
         }
@@ -1258,7 +1270,7 @@ main(int argc, char **argv)
     char *user       = NULL;
     char *local_port = NULL;
     char *local_addr = NULL;
-    char *password   = NULL;
+    char *server_pk   = NULL;
     char *key        = NULL;
     char *timeout    = NULL;
     char *method     = NULL;
@@ -1345,7 +1357,7 @@ main(int argc, char **argv)
             break;
         case GETOPT_VAL_PASSWORD:
         case 'k':
-            password = optarg;
+            server_pk = optarg;
             break;
         case 'f':
             pid_flags = 1;
@@ -1432,8 +1444,8 @@ main(int argc, char **argv)
         if (local_port == NULL) {
             local_port = conf->local_port;
         }
-        if (password == NULL) {
-            password = conf->password;
+        if (server_pk == NULL) {
+            server_pk = conf->password;
         }
         if (key == NULL) {
             key = conf->key;
@@ -1479,7 +1491,7 @@ main(int argc, char **argv)
 #ifndef HAVE_LAUNCHD
         local_port == NULL ||
 #endif
-        (password == NULL && key == NULL)) {
+        (server_pk == NULL && key == NULL)) {
         usage();
         exit(EXIT_FAILURE);
     }
@@ -1563,9 +1575,16 @@ main(int argc, char **argv)
 
     // Setup keys
     LOGI("initializing ciphers... %s", method);
-    crypto = crypto_init(password, key, method);
-    if (crypto == NULL)
+    unsigned char rpk[crypto_kx_PUBLICKEYBYTES];
+    LOGI("Server public key is %s", server_pk);
+    int ret = crypto_kx_hex2bin(rpk, crypto_kx_PUBLICKEYBYTES, server_pk);
+    if (ret) {
+        FATAL("Failed to init encryption key");
+    }
+    crypto = crypto_init(rpk, NULL, method);
+    if (crypto == NULL) {
         FATAL("failed to initialize ciphers");
+    }
 
     // Setup proxy context
     listen_ctx_t listen_ctx;
@@ -1593,15 +1612,15 @@ main(int argc, char **argv)
     listen_ctx.iface   = iface;
     listen_ctx.mptcp   = mptcp;
 
+    EV_P = EV_DEFAULT;
+    // EV_P = ev_loop_new (ev_recommended_backends () | EVBACKEND_KQUEUE);
     // Setup signal handler
     ev_signal_init(&sigint_watcher, signal_cb, SIGINT);
     ev_signal_init(&sigterm_watcher, signal_cb, SIGTERM);
-    ev_signal_start(EV_DEFAULT, &sigint_watcher);
-    ev_signal_start(EV_DEFAULT, &sigterm_watcher);
+    ev_signal_start(EV_A, &sigint_watcher);
+    ev_signal_start(EV_A, &sigterm_watcher);
     ev_signal_init(&sigchld_watcher, signal_cb, SIGCHLD);
-    ev_signal_start(EV_DEFAULT, &sigchld_watcher);
-
-    struct ev_loop *loop = EV_DEFAULT;
+    ev_signal_start(EV_A, &sigchld_watcher);
 
     if (mode != UDP_ONLY) {
         // Setup socket
@@ -1636,8 +1655,9 @@ main(int argc, char **argv)
             FATAL("failed to resolve the provided hostname");
         }
         struct sockaddr *addr = (struct sockaddr *)storage;
-        init_udprelay(local_addr, local_port, addr,
-                      get_sockaddr_len(addr), mtu, crypto, listen_ctx.timeout, iface);
+        init_udprelay(EV_A, local_addr, local_port, addr,
+                      get_sockaddr_len(addr), mtu, crypto, server_pk,
+                      listen_ctx.timeout, iface);
     }
 
 #ifdef HAVE_LAUNCHD
@@ -1687,20 +1707,21 @@ main(int argc, char **argv)
         free_udprelay();
     }
 
+    ev_loop_destroy(loop);
     return 0;
 }
 
 #else
 
 int
-start_ss_local_server(profile_t profile)
+start_ss_local_server(profile_t profile, PlexsocksBlock statusBlock, void *data)
 {
-    srand(time(NULL));
+    srand((unsigned int)time(NULL));
 
     char *remote_host = profile.remote_host;
     char *local_addr  = profile.local_addr;
     char *method      = profile.method;
-    char *password    = profile.password;
+    char *server_pk   = profile.password;
     char *log         = profile.log;
     int remote_port   = profile.remote_port;
     int local_port    = profile.local_port;
@@ -1732,19 +1753,29 @@ start_ss_local_server(profile_t profile)
     // ignore SIGPIPE
     signal(SIGPIPE, SIG_IGN);
     signal(SIGABRT, SIG_IGN);
+    // struct ev_loop *loop = EV_DEFAULT;
+    EV_P = ev_loop_new (ev_recommended_backends ()
+        | EVBACKEND_KQUEUE);
+
 
     ev_signal_init(&sigint_watcher, signal_cb, SIGINT);
     ev_signal_init(&sigterm_watcher, signal_cb, SIGTERM);
-    ev_signal_start(EV_DEFAULT, &sigint_watcher);
-    ev_signal_start(EV_DEFAULT, &sigterm_watcher);
+    ev_signal_start(EV_A, &sigint_watcher);
+    ev_signal_start(EV_A, &sigterm_watcher);
     ev_signal_init(&sigusr1_watcher, signal_cb, SIGUSR1);
     ev_signal_init(&sigchld_watcher, signal_cb, SIGCHLD);
-    ev_signal_start(EV_DEFAULT, &sigusr1_watcher);
-    ev_signal_start(EV_DEFAULT, &sigchld_watcher);
+    ev_signal_start(EV_A, &sigusr1_watcher);
+    ev_signal_start(EV_A, &sigchld_watcher);
 
     // Setup keys
     LOGI("initializing ciphers... %s", method);
-    crypto = crypto_init(password, NULL, method);
+    unsigned char rpk[crypto_kx_PUBLICKEYBYTES];
+    LOGI("Server public key is %s", server_pk);
+    int ret = crypto_kx_hex2bin(rpk, crypto_kx_PUBLICKEYBYTES, server_pk);
+    if (ret) {
+        FATAL("Failed to init encryption key");
+    }
+    crypto = crypto_init(rpk, NULL, method);
     if (crypto == NULL)
         FATAL("failed to init ciphers");
 
@@ -1755,8 +1786,6 @@ start_ss_local_server(profile_t profile)
     }
 
     // Setup proxy context
-    struct ev_loop *loop = EV_DEFAULT;
-
     struct sockaddr *remote_addr_tmp[MAX_REMOTE_NUM];
     listen_ctx_t listen_ctx;
     listen_ctx.remote_num     = 1;
@@ -1772,10 +1801,26 @@ start_ss_local_server(profile_t profile)
         listenfd = create_and_bind(local_addr, local_port_str);
         if (listenfd == -1) {
             ERROR("bind()");
+            ev_signal_stop(EV_A, &sigint_watcher);
+            ev_signal_stop(EV_A, &sigterm_watcher);
+            ev_signal_stop(EV_A, &sigchld_watcher);
+            ev_signal_stop(EV_A, &sigusr1_watcher);
+            // Clean up
+            if (mode != UDP_ONLY) {
+                close(listen_ctx.fd);
+            }
             return -1;
         }
         if (listen(listenfd, SOMAXCONN) == -1) {
             ERROR("listen()");
+            ev_signal_stop(EV_A, &sigint_watcher);
+            ev_signal_stop(EV_A, &sigterm_watcher);
+            ev_signal_stop(EV_A, &sigchld_watcher);
+            ev_signal_stop(EV_A, &sigusr1_watcher);
+            // Clean up
+            if (mode != UDP_ONLY) {
+                close(listen_ctx.fd);
+            }
             return -1;
         }
         setnonblocking(listenfd);
@@ -1790,8 +1835,8 @@ start_ss_local_server(profile_t profile)
     if (mode != TCP_ONLY) {
         LOGI("udprelay enabled");
         struct sockaddr *addr = (struct sockaddr *)(&storage);
-        init_udprelay(local_addr, local_port_str, addr,
-                      get_sockaddr_len(addr), mtu, crypto, timeout, NULL);
+        init_udprelay(EV_A, local_addr, local_port_str, addr,
+                      get_sockaddr_len(addr), mtu, crypto, server_pk, timeout, NULL);
     }
 
     if (strcmp(local_addr, ":") > 0)
@@ -1802,6 +1847,11 @@ start_ss_local_server(profile_t profile)
     // Init connections
     cork_dllist_init(&connections);
 
+    // block return status
+    if (statusBlock) {
+        statusBlock(&listen_ctx, listen_ctx.fd, data);
+    }
+    
     // Enter the loop
     ev_run(loop, 0);
 
@@ -1820,7 +1870,28 @@ start_ss_local_server(profile_t profile)
         free_udprelay();
     }
 
+    ev_loop_destroy(loop);
     return 0;
+}
+
+void plexsocks_servver_stop(void* listener)
+{
+    EV_P = EV_DEFAULT;
+    listen_ctx_t * listen_ctx = listener;
+    // 有错误释放资源，返回错误码listen_ctx_t
+    ev_signal_stop(EV_A, &sigint_watcher);
+    ev_signal_stop(EV_A, &sigterm_watcher);
+    ev_signal_stop(EV_A, &sigchld_watcher);
+    ev_signal_stop(EV_A, &sigusr1_watcher);
+    // Clean up
+    if (mode != UDP_ONLY) {
+        ev_io_stop(loop, &listen_ctx->io);
+        free_connections(loop);
+        close(listen_ctx->fd);
+    }
+    if (mode != TCP_ONLY) {
+        free_udprelay();
+    }
 }
 
 #endif

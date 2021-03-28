@@ -41,6 +41,7 @@
 #include "cache.h"
 
 #include "common.h"
+#include "ev.h"
 
 #define MAX_UDP_PACKET_SIZE (65507)
 
@@ -60,9 +61,8 @@ typedef struct server_ctx {
     ss_addr_t tunnel_addr;
 #endif
 #endif
-#ifdef MODULE_REMOTE
+    kx_ctx_t kx;
     struct ev_loop *loop;
-#endif
 } server_ctx_t;
 
 #ifdef MODULE_REMOTE
@@ -88,6 +88,7 @@ typedef struct remote_ctx {
 #ifdef MODULE_REMOTE
     struct sockaddr_storage dst_addr;
 #endif
+    kx_ctx_t kx;
     struct server_ctx *server_ctx;
 } remote_ctx_t;
 

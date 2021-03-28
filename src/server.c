@@ -1316,8 +1316,15 @@ new_server(int fd, listen_ctx_t *listener)
 
     server->e_ctx = ss_align(sizeof(cipher_ctx_t));
     server->d_ctx = ss_align(sizeof(cipher_ctx_t));
-    crypto->ctx_init(crypto->cipher, server->e_ctx, 1);
-    crypto->ctx_init(crypto->cipher, server->d_ctx, 0);
+    
+    kx_ctx_t kx;
+    memset(&kx, 0, sizeof(kx_ctx_t));
+
+    crypto_kx_ctx_init(&kx, 1, crypto->cipher->pk);
+    crypto->ctx_init(crypto->cipher, &kx, server->e_ctx, 1);
+    crypto->ctx_init(crypto->cipher, &kx, server->d_ctx, 0);
+    server->e_ctx->is_local = 1;
+    server->d_ctx->is_local = 1;
 
     int request_timeout = min(MAX_REQUEST_TIMEOUT, listener->timeout)
                           + rand() % MAX_REQUEST_TIMEOUT;
@@ -1401,9 +1408,9 @@ signal_cb(EV_P_ ev_signal *w, int revents)
                 return;
         case SIGINT:
         case SIGTERM:
-            ev_signal_stop(EV_DEFAULT, &sigint_watcher);
-            ev_signal_stop(EV_DEFAULT, &sigterm_watcher);
-            ev_signal_stop(EV_DEFAULT, &sigchld_watcher);
+            ev_signal_stop(EV_A, &sigint_watcher);
+            ev_signal_stop(EV_A, &sigterm_watcher);
+            ev_signal_stop(EV_A, &sigchld_watcher);
             ev_unloop(EV_A_ EVUNLOOP_ALL);
         }
     }
@@ -1467,7 +1474,7 @@ main(int argc, char **argv)
     int mptcp       = 0;
     int mtu         = 0;
     char *user      = NULL;
-    char *password  = NULL;
+    char *server_pk  = NULL;
     char *key       = NULL;
     char *timeout   = NULL;
     char *method    = NULL;
@@ -1554,7 +1561,7 @@ main(int argc, char **argv)
             break;
         case GETOPT_VAL_PASSWORD:
         case 'k':
-            password = optarg;
+            server_pk = optarg;
             break;
         case 'f':
             pid_flags = 1;
@@ -1633,8 +1640,8 @@ main(int argc, char **argv)
         if (server_port == NULL) {
             server_port = conf->remote_port;
         }
-        if (password == NULL) {
-            password = conf->password;
+        if (server_pk == NULL) {
+            server_pk = conf->password;
         }
         if (key == NULL) {
             key = conf->key;
@@ -1687,7 +1694,7 @@ main(int argc, char **argv)
     }
 
     if (server_num == 0 || server_port == NULL
-            || (password == NULL && key == NULL)) {
+            || (server_pk == NULL && key == NULL)) {
         usage();
         exit(EXIT_FAILURE);
     }
@@ -1758,22 +1765,29 @@ main(int argc, char **argv)
     // ignore SIGPIPE
     signal(SIGPIPE, SIG_IGN);
     signal(SIGABRT, SIG_IGN);
+    
+    // initialize ev loop
+    struct ev_loop *loop = ev_loop_new (ev_recommended_backends ()
+            | EVBACKEND_KQUEUE);
 
     ev_signal_init(&sigint_watcher, signal_cb, SIGINT);
     ev_signal_init(&sigterm_watcher, signal_cb, SIGTERM);
     ev_signal_init(&sigchld_watcher, signal_cb, SIGCHLD);
-    ev_signal_start(EV_DEFAULT, &sigint_watcher);
-    ev_signal_start(EV_DEFAULT, &sigterm_watcher);
-    ev_signal_start(EV_DEFAULT, &sigchld_watcher);
+    ev_signal_start(EV_A, &sigint_watcher);
+    ev_signal_start(EV_A, &sigterm_watcher);
+    ev_signal_start(EV_A, &sigchld_watcher);
 
     // setup keys
     LOGI("initializing ciphers... %s", method);
-    crypto = crypto_init(password, key, method);
+    unsigned char rpk[crypto_kx_PUBLICKEYBYTES];
+    LOGI("Server public key is %s", server_pk);
+    int ret = crypto_kx_hex2bin(rpk, crypto_kx_PUBLICKEYBYTES, server_pk);
+    if (ret) {
+        FATAL("Failed to init encryption key");
+    }
+    crypto = crypto_init(rpk, NULL, method);
     if (crypto == NULL)
         FATAL("failed to initialize ciphers");
-
-    // initialize ev loop
-    struct ev_loop *loop = EV_DEFAULT;
 
     // setup udns
     if (nameserver_num == 0) {
@@ -1856,7 +1870,7 @@ main(int argc, char **argv)
                 port = plugin_port;
             }
             // Setup UDP
-            init_udprelay(host, port, mtu, crypto, atoi(timeout), iface);
+            init_udprelay(EV_A, host, port, mtu, crypto, server_pk, atoi(timeout), iface);
             if (host && strcmp(host, ":") > 0)
                 LOGI("udp server listening at [%s]:%s", host, port);
             else

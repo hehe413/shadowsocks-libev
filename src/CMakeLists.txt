@@ -83,14 +83,12 @@ set(SS_REDIR_SOURCE
         )
 
 
-if (WITH_STATIC)
 find_library(LIBSODIUM libsodium.a)
 find_library(LIBMBEDTLS libmbedtls.a)
 find_library(LIBMBEDCRYPTO libmbedcrypto.a)
 find_library(LIBEV libev.a)
 find_library(LIBUDNS libudns.a)
 find_library(LIBPCRE libpcre.a)
-endif ()
 
 find_library(LIBSODIUM_SHARED sodium)
 find_library(LIBMBEDTLS_SHARED mbedtls)
@@ -100,7 +98,6 @@ find_library(LIBUDNS_SHARED udns)
 find_library(LIBPCRE_SHARED pcre)
 
 # Dependencies we need for static and shared
-if (WITH_STATIC)
 list(APPEND DEPS
         m
         bloom
@@ -111,8 +108,6 @@ list(APPEND DEPS
         ${LIBMBEDTLS}
         ${LIBMBEDCRYPTO}
         )
-endif ()
-
 list(APPEND DEPS_SHARED
         m
         bloom-shared
@@ -126,7 +121,6 @@ list(APPEND DEPS_SHARED
 
 find_package (Threads)
 
-if (WITH_STATIC)
 # ------------------------------------------------------------------
 # Static
 # By default we use normal name for static, all shared targets will add a `-shared' suffix
@@ -155,7 +149,6 @@ target_link_libraries(ss-manager m bloom cork ${LIBEV} ${LIBUDNS})
 target_link_libraries(ss-local cork ipset ${DEPS})
 target_link_libraries(ss-redir cork ipset ${DEPS})
 target_link_libraries(shadowsocks-libev cork ipset ${DEPS})
-endif ()
 
 # ------------------------------------------------------------------
 # Shared
@@ -207,15 +200,9 @@ target_link_libraries(shadowsocks-libev-shared cork-shared ipset-shared ${DEPS_S
 # Recommend to install shared by default
 install(DIRECTORY ${RUNTIME_SHARED_OUTPUT_DIRECTORY}/
         DESTINATION bin)
-
-if (WITH_STATIC)
-    install(TARGETS shadowsocks-libev
+install(TARGETS shadowsocks-libev shadowsocks-libev-shared
+        LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib)
-endif ()
-
-install(TARGETS shadowsocks-libev-shared
-        LIBRARY DESTINATION lib)
-
 install(FILES shadowsocks.h DESTINATION include)
 
 
