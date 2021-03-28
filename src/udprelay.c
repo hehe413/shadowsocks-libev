@@ -746,7 +746,10 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
     buf->len = r;
 
 #ifdef MODULE_LOCAL
-    int err = server_ctx->crypto->decrypt_all(buf, server_ctx->crypto->cipher, buf_size);
+    int err = server_ctx->crypto->decrypt_all(buf,
+                                              server_ctx->crypto->cipher,
+                                              &remote_ctx->kx,
+                                              buf_size);
     if (err) {
         // drop the packet silently
         goto CLEAN_UP;
@@ -803,7 +806,10 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
     memcpy(buf->data, addr_header, addr_header_len);
     buf->len += addr_header_len;
 
-    int err = server_ctx->crypto->encrypt_all(buf, server_ctx->crypto->cipher, buf_size);
+    int err = server_ctx->crypto->encrypt_all(buf,
+                                              server_ctx->crypto->cipher,
+                                              &remote_ctx->kx,
+                                              buf_size);
     if (err) {
         // drop the packet silently
         goto CLEAN_UP;
@@ -956,7 +962,10 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
 #ifdef MODULE_REMOTE
     tx += buf->len;
 
-    int err = server_ctx->crypto->decrypt_all(buf, server_ctx->crypto->cipher, buf_size);
+    int err = server_ctx->crypto->decrypt_all(buf,
+                                              server_ctx->crypto->cipher,
+					      &server_ctx->kx,
+                                              buf_size);
     if (err) {
         // drop the packet silently
         goto CLEAN_UP;
@@ -1199,6 +1208,8 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         remote_ctx           = new_remote(remotefd, server_ctx);
         remote_ctx->src_addr = src_addr;
         remote_ctx->af       = remote_addr->sa_family;
+        // crypto_kx_ctx_init(&remote_ctx->kx, 1, server_ctx->crypto->cipher->pk);
+        memcpy(&remote_ctx->kx, &server_ctx->kx, sizeof(remote_ctx->kx));
 
         // Add to conn cache
         cache_insert(conn_cache, key, HASH_KEY_LEN, (void *)remote_ctx);
@@ -1213,7 +1224,8 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         memmove(buf->data, buf->data + offset, buf->len);
     }
 
-    int err = server_ctx->crypto->encrypt_all(buf, server_ctx->crypto->cipher, buf_size);
+    int err = server_ctx->crypto->encrypt_all(buf, server_ctx->crypto->cipher,
+            &remote_ctx->kx, buf_size);
 
     if (err) {
         // drop the packet silently
@@ -1278,6 +1290,8 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
                 remote_ctx->src_addr   = src_addr;
                 remote_ctx->server_ctx = server_ctx;
                 memcpy(&remote_ctx->dst_addr, &dst_addr, sizeof(struct sockaddr_storage));
+                crypto_kx_ctx_init(&remote_ctx->kx, 0,
+                                   server_ctx->crypto->cipher->pk);
             } else {
                 ERROR("[udp] bind() error");
                 goto CLEAN_UP;
@@ -1354,7 +1368,8 @@ init_udprelay(const char *server_host, const char *server_port,
               const ss_addr_t tunnel_addr,
 #endif
 #endif
-              int mtu, crypto_t *crypto, int timeout, const char *iface)
+              int mtu, crypto_t *crypto, const char *server_pk,
+              int timeout, const char *iface)
 {
     s_port = server_port;
     // Initialize ev loop
@@ -1395,6 +1410,7 @@ init_udprelay(const char *server_host, const char *server_port,
     server_ctx->tunnel_addr = tunnel_addr;
 #endif
 #endif
+    crypto_kx_ctx_init_udp(&server_ctx->kx, server_pk);
 
     ev_io_start(loop, &server_ctx->io);
 

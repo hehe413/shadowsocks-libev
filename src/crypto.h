@@ -68,7 +68,7 @@ typedef mbedtls_md_info_t digest_type_t;
 #define min(a, b) (((a) < (b)) ? (a) : (b))
 #define max(a, b) (((a) > (b)) ? (a) : (b))
 
-#define SUBKEY_INFO "ss-subkey"
+#define SUBKEY_INFO "ps-subkey"
 #define IV_INFO "ss-iv"
 
 #ifndef BF_NUM_ENTRIES_FOR_SERVER
@@ -94,6 +94,16 @@ typedef struct buffer {
     char   *data;
 } buffer_t;
 
+typedef struct kx_ctx {
+    uint16_t pk_sent;
+    uint16_t rpk_received;
+    unsigned char pk[crypto_kx_PUBLICKEYBYTES];
+    unsigned char sk[crypto_kx_SESSIONKEYBYTES];
+    unsigned char rpk[crypto_kx_PUBLICKEYBYTES];
+    unsigned char rx[crypto_kx_SESSIONKEYBYTES];
+    unsigned char tx[crypto_kx_SESSIONKEYBYTES];
+} kx_ctx_t;
+
 typedef struct {
     int method;
     int skey;
@@ -101,31 +111,35 @@ typedef struct {
     size_t nonce_len;
     size_t key_len;
     size_t tag_len;
-    uint8_t key[MAX_KEY_LENGTH];
+    uint8_t pk[crypto_kx_PUBLICKEYBYTES];
+    uint8_t sk[crypto_kx_SECRETKEYBYTES]; // not used for local
 } cipher_t;
 
 typedef struct {
-    uint32_t init;
+    uint16_t init;
+    uint16_t is_local;
     uint64_t counter;
     cipher_evp_t *evp;
     aes256gcm_ctx *aes256gcm_ctx;
     cipher_t *cipher;
     buffer_t *chunk;
+    kx_ctx_t kx;
     uint8_t salt[MAX_KEY_LENGTH];
-    uint8_t skey[MAX_KEY_LENGTH];
+    uint8_t s_rx[MAX_KEY_LENGTH];   // hkdf rx key
+    uint8_t s_tx[MAX_KEY_LENGTH];   // hkdf tx key
     uint8_t nonce[MAX_NONCE_LENGTH];
 } cipher_ctx_t;
 
 typedef struct crypto {
     cipher_t *cipher;
 
-    int(*const encrypt_all) (buffer_t *, cipher_t *, size_t);
-    int(*const decrypt_all) (buffer_t *, cipher_t *, size_t);
-    int(*const encrypt) (buffer_t *, cipher_ctx_t *, size_t);
-    int(*const decrypt) (buffer_t *, cipher_ctx_t *, size_t);
+    int(*const encrypt_all)(buffer_t *, cipher_t *, kx_ctx_t *, size_t);
+    int(*const decrypt_all)(buffer_t *, cipher_t *, kx_ctx_t *, size_t);
+    int(*const encrypt)(buffer_t *, cipher_ctx_t *, size_t);
+    int(*const decrypt)(buffer_t *, cipher_ctx_t *, size_t);
 
-    void(*const ctx_init) (cipher_t *, cipher_ctx_t *, int);
-    void(*const ctx_release) (cipher_ctx_t *);
+    void(*const ctx_init)(cipher_t *, kx_ctx_t *, cipher_ctx_t *, int);
+    void(*const ctx_release)(cipher_ctx_t *);
 } crypto_t;
 
 int balloc(buffer_t *, size_t);
@@ -136,6 +150,11 @@ int rand_bytes(void *, int);
 
 crypto_t *crypto_init(const char *, const char *, const char *);
 unsigned char *crypto_md5(const unsigned char *, size_t, unsigned char *);
+
+int crypto_kx_hex2bin(unsigned char *bin, size_t bin_len, const char *hex);
+int crypto_kx_ctx_init(kx_ctx_t *kx, int is_local,
+        unsigned char *rpk);
+int crypto_kx_ctx_init_udp(kx_ctx_t *kx, unsigned char *rpk);
 
 int crypto_derive_key(const char *, uint8_t *, size_t);
 int crypto_parse_key(const char *, uint8_t *, size_t);

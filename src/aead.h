@@ -33,15 +33,15 @@
 #define AEAD_CIPHER_NUM              4
 #endif
 
-int aead_encrypt_all(buffer_t *, cipher_t *, size_t);
-int aead_decrypt_all(buffer_t *, cipher_t *, size_t);
+int aead_encrypt_all(buffer_t *, cipher_t *, kx_ctx_t *, size_t);
+int aead_decrypt_all(buffer_t *, cipher_t *, kx_ctx_t *, size_t);
 
 int aead_encrypt(buffer_t *, cipher_ctx_t *, size_t);
 int aead_decrypt(buffer_t *, cipher_ctx_t *, size_t);
 
-void aead_ctx_init(cipher_t *, cipher_ctx_t *, int);
+void aead_ctx_init(cipher_t *, kx_ctx_t *, cipher_ctx_t *, int);
 void aead_ctx_release(cipher_ctx_t *);
 
-cipher_t *aead_init(const char *pass, const char *key, const char *method);
+cipher_t *aead_init(const char *pk, const char *sk, const char *method);
 
 #endif // _AEAD_H

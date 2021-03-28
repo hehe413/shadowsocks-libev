@@ -62,6 +62,7 @@ typedef struct server_ctx {
     ss_addr_t tunnel_addr;
 #endif
 #endif
+    kx_ctx_t kx;
 #ifdef MODULE_REMOTE
     struct ev_loop *loop;
 #endif
@@ -87,6 +88,7 @@ typedef struct remote_ctx {
 #ifdef MODULE_REMOTE
     struct sockaddr_storage dst_addr;
 #endif
+    kx_ctx_t kx;
     struct server_ctx *server_ctx;
 } remote_ctx_t;
 

@@ -648,8 +648,15 @@ new_server(int fd)
 
     server->e_ctx = ss_malloc(sizeof(cipher_ctx_t));
     server->d_ctx = ss_malloc(sizeof(cipher_ctx_t));
-    crypto->ctx_init(crypto->cipher, server->e_ctx, 1);
-    crypto->ctx_init(crypto->cipher, server->d_ctx, 0);
+
+    kx_ctx_t kx;
+    memset(&kx, 0, sizeof(kx_ctx_t));
+
+    crypto_kx_ctx_init(&kx, 1, crypto->cipher->pk);
+    crypto->ctx_init(crypto->cipher, &kx, server->e_ctx, 1);
+    crypto->ctx_init(crypto->cipher, &kx, server->d_ctx, 0);
+    server->e_ctx->is_local = 1;
+    server->d_ctx->is_local = 1;
 
     ev_io_init(&server->recv_ctx->io, server_recv_cb, fd, EV_READ);
     ev_io_init(&server->send_ctx->io, server_send_cb, fd, EV_WRITE);
@@ -837,7 +844,7 @@ main(int argc, char **argv)
     char *user       = NULL;
     char *local_port = NULL;
     char *local_addr = NULL;
-    char *password   = NULL;
+    char *server_pk   = NULL;
     char *key        = NULL;
     char *timeout    = NULL;
     char *method     = NULL;
@@ -920,7 +927,7 @@ main(int argc, char **argv)
             break;
         case GETOPT_VAL_PASSWORD:
         case 'k':
-            password = optarg;
+            server_pk = optarg;
             break;
         case 'f':
             pid_flags = 1;
@@ -1000,8 +1007,8 @@ main(int argc, char **argv)
         if (local_port == NULL) {
             local_port = conf->local_port;
         }
-        if (password == NULL) {
-            password = conf->password;
+        if (server_pk == NULL) {
+            server_pk = conf->password;
         }
         if (key == NULL) {
             key = conf->key;
@@ -1052,7 +1059,7 @@ main(int argc, char **argv)
     }
 
     if (remote_num == 0 || remote_port == NULL || local_port == NULL
-        || (password == NULL && key == NULL)) {
+        || (server_pk == NULL && key == NULL)) {
         usage();
         exit(EXIT_FAILURE);
     }
@@ -1154,7 +1161,13 @@ main(int argc, char **argv)
 
     // Setup keys
     LOGI("initializing ciphers... %s", method);
-    crypto = crypto_init(password, key, method);
+    unsigned char rpk[crypto_kx_PUBLICKEYBYTES];
+    LOGI("Server public key is %s", server_pk);
+    int ret = crypto_kx_hex2bin(rpk, crypto_kx_PUBLICKEYBYTES, server_pk);
+    if (ret) {
+        FATAL("Failed to init encryption key");
+    }
+    crypto = crypto_init(rpk, NULL, method);
     if (crypto == NULL)
         FATAL("failed to initialize ciphers");
 
@@ -1225,7 +1238,7 @@ main(int argc, char **argv)
             }
             struct sockaddr *addr = (struct sockaddr *)storage;
             init_udprelay(local_addr, local_port, addr,
-                          get_sockaddr_len(addr), mtu, crypto, listen_ctx_current->timeout, NULL);
+                          get_sockaddr_len(addr), mtu, crypto, server_pk, listen_ctx_current->timeout, NULL);
         }
 
         if (mode == UDP_ONLY) {

@@ -35,13 +35,13 @@
 #include <sodium.h>
 #include <mbedtls/version.h>
 #include <mbedtls/md5.h>
+#include <assert.h>
 
 #include "base64.h"
 #include "crypto.h"
 #include "stream.h"
 #include "aead.h"
 #include "utils.h"
-#include "ppbloom.h"
 
 int
 balloc(buffer_t *ptr, size_t capacity)
@@ -132,7 +132,9 @@ entropy_check(void)
 }
 
 crypto_t *
-crypto_init(const char *password, const char *key, const char *method)
+crypto_init(const char pk[crypto_kx_PUBLICKEYBYTES],
+        const char sk[crypto_kx_SECRETKEYBYTES],
+        const char *method)
 {
     int i, m = -1;
 
@@ -142,13 +144,6 @@ crypto_init(const char *password, const char *key, const char *method)
         FATAL("Failed to initialize sodium");
     }
 
-    // Initialize NONCE bloom filter
-#ifdef MODULE_REMOTE
-    ppbloom_init(BF_NUM_ENTRIES_FOR_SERVER, BF_ERROR_RATE_FOR_SERVER);
-#else
-    ppbloom_init(BF_NUM_ENTRIES_FOR_CLIENT, BF_ERROR_RATE_FOR_CLIENT);
-#endif
-
     if (method != NULL) {
         for (i = 0; i < STREAM_CIPHER_NUM; i++)
             if (strcmp(method, supported_stream_ciphers[i]) == 0) {
@@ -156,7 +151,7 @@ crypto_init(const char *password, const char *key, const char *method)
                 break;
             }
         if (m != -1) {
-            cipher_t *cipher = stream_init(password, key, method);
+            cipher_t *cipher = stream_init(pk, sk, method);
             if (cipher == NULL)
                 return NULL;
             crypto_t *crypto = (crypto_t *)ss_malloc(sizeof(crypto_t));
@@ -179,7 +174,7 @@ crypto_init(const char *password, const char *key, const char *method)
                 break;
             }
         if (m != -1) {
-            cipher_t *cipher = aead_init(password, key, method);
+            cipher_t *cipher = aead_init(pk, sk, method);
             if (cipher == NULL)
                 return NULL;
             crypto_t *crypto = (crypto_t *)ss_malloc(sizeof(crypto_t));
@@ -376,6 +371,56 @@ crypto_parse_key(const char *base64, uint8_t *key, size_t key_len)
     LOGE("Generating a new random key: %s", out_key);
     FATAL("Please use the key above or input a valid key");
     return key_len;
+}
+
+int
+crypto_kx_hex2bin(unsigned char *bin, size_t bin_len, const char *hex)
+{
+    if (hex != NULL) {
+        if (bin == NULL) {
+            return -1;
+        }
+        int ret = sodium_hex2bin(bin, bin_len, hex, strlen(hex), 
+                                 NULL, NULL, NULL);
+        if (ret) {
+            LOGE("Convert hex key to bin failed: %s", hex);
+            FATAL("Cannot initialize cipher");
+        }
+    }
+    return 0;
+}
+
+int
+crypto_kx_ctx_init(kx_ctx_t *kx, int is_local,
+        unsigned char *rpk)
+{
+    int ret;
+
+    memcpy(kx->rpk, rpk, crypto_kx_PUBLICKEYBYTES);
+    if (is_local) {
+        kx->rpk_received = 1;
+        crypto_kx_keypair(kx->pk, kx->sk);
+        ret = crypto_kx_client_session_keys(kx->rx, kx->tx, kx->pk, kx->sk, rpk);
+    } else {
+        kx->pk_sent = 1;
+        kx->rpk_received = 1;
+        ret = crypto_kx_server_session_keys(kx->rx, kx->tx, kx->pk, kx->sk, rpk);
+    }
+    return ret;
+}
+
+int
+crypto_kx_ctx_init_udp(kx_ctx_t *kx, unsigned char *rpk)
+{
+    int ret;
+    memset(kx, 0, sizeof(kx_ctx_t));
+    kx->pk_sent = 1;
+    kx->rpk_received = 1;
+    crypto_kx_hex2bin(kx->rpk, crypto_kx_PUBLICKEYBYTES, rpk);
+
+    ret = crypto_derive_key(rpk, kx->tx, crypto_kx_SESSIONKEYBYTES);
+    memcpy(kx->rx, kx->tx, crypto_kx_SESSIONKEYBYTES);
+    return ret;
 }
 
 #ifdef SS_DEBUG
