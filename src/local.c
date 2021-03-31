@@ -1872,7 +1872,7 @@ main(int argc, char **argv)
     if (ret) {
         FATAL("Failed to init encryption key");
     }
-    crypto = crypto_init(rpk, NULL, method);
+    crypto = crypto_init((char *)rpk, NULL, method);
     if (crypto == NULL)
         FATAL("failed to initialize ciphers");
 
@@ -2081,7 +2081,7 @@ _start_ss_local_server(profile_t profile, ss_local_callback callback, void *udat
     if (ret) {
         FATAL("Failed to init encryption key");
     }
-    crypto = crypto_init(rpk, NULL, method);
+    crypto = crypto_init((char *)rpk, NULL, method);
     if (crypto == NULL)
         FATAL("failed to init ciphers");
 

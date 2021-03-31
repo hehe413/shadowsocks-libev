@@ -1410,7 +1410,7 @@ init_udprelay(const char *server_host, const char *server_port,
     server_ctx->tunnel_addr = tunnel_addr;
 #endif
 #endif
-    crypto_kx_ctx_init_udp(&server_ctx->kx, server_pk);
+    crypto_kx_ctx_init_udp(&server_ctx->kx, (unsigned char *)server_pk);
 
     ev_io_start(loop, &server_ctx->io);
 
