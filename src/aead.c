@@ -466,7 +466,7 @@ aead_decrypt_all(buffer_t *ciphertext, cipher_t *cipher, kx_ctx_t *kx, size_t ca
     cipher_ctx_t cipher_ctx;
     if (! kx->rpk_received) {
         // init server kx ctx
-        crypto_kx_ctx_init(kx, 0, ciphertext->data);
+        crypto_kx_ctx_init(kx, 0, (unsigned char *)ciphertext->data);
         kx->rpk_received = 1;
     }
     aead_ctx_init(cipher, kx, &cipher_ctx, 0);

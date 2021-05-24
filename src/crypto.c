@@ -408,9 +408,9 @@ crypto_kx_ctx_init_udp(kx_ctx_t *kx, unsigned char *rpk)
     memset(kx, 0, sizeof(kx_ctx_t));
     kx->pk_sent = 1;
     kx->rpk_received = 1;
-    crypto_kx_hex2bin(kx->rpk, crypto_kx_PUBLICKEYBYTES, rpk);
+    crypto_kx_hex2bin(kx->rpk, crypto_kx_PUBLICKEYBYTES, (char *)rpk);
 
-    ret = crypto_derive_key(rpk, kx->tx, crypto_kx_SESSIONKEYBYTES);
+    ret = crypto_derive_key((char *)rpk, kx->tx, crypto_kx_SESSIONKEYBYTES);
     memcpy(kx->rx, kx->tx, crypto_kx_SESSIONKEYBYTES);
     return ret;
 }
